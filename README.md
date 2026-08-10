@@ -56,9 +56,32 @@ In Claude Code:
 ```
 
 Then authenticate with the `login` MCP tool. It opens praxys.run in your
-browser and caches the returned token locally at `~/.praxys/token`. Use
-`whoami` to verify the account and `logout` to remove only that active
-authentication scope.
+browser with opaque, expiring handoff state. After first-party approval, the
+plugin exchanges a client-held verifier for a revocable MCP session and caches
+it at `~/.praxys/token`; the Praxys account JWT never enters the URL or plugin
+process. Use `whoami` to verify the account and `logout` to remove only that
+active authentication scope.
+
+### Purpose-bound plan context
+
+Personal plan context is deny-by-default even after MCP login:
+
+1. Call `request_personal_context_access` with one purpose, context kind, and
+   `read`, `write`, or both.
+2. Open the returned Praxys link and approve the exact short-lived request.
+3. Call `complete_personal_context_access`.
+4. Use `read_personal_context` for the minimum structured projection or
+   `preview_personal_context` to validate one single-use structured draft.
+5. Call `revoke_personal_context_access` when finished.
+
+Read grants never return narrative, context IDs, provenance internals, consent
+receipts, or encrypted data. Write grants create only a request-scoped preview:
+the athlete must re-enter or confirm context in the first-party web or miniapp
+plan-context surface before anything durable exists. The plugin cannot approve
+its own access, grant AI processing, delete context, or persist conversation
+text. Local direct-DB mode resolves the same server-authoritative grant tables
+and does not bypass purpose, expiry, revocation, ownership, or single-use
+checks.
 
 ## Configuration
 

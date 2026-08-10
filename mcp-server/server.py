@@ -46,9 +46,15 @@ if _auth is None:
 
 get_auth_scope = _auth.get_auth_scope
 get_token = _auth.get_token
+get_context_token = _auth.get_context_token
+get_pending_context_access = _auth.get_pending_context_access
 clear_auth_scope = _auth.logout
+clear_context_token = _auth.clear_context_token
+clear_pending_context_access = _auth.clear_pending_context_access
 save_config = _auth.save_config
 save_token = _auth.save_token
+save_context_token = _auth.save_context_token
+save_pending_context_access = _auth.save_pending_context_access
 
 mcp = FastMCP("praxys", instructions="Training data tools for Praxys dashboard")
 
@@ -89,7 +95,7 @@ REMOTE_URL = (
 FRONTEND_URL = (
     _clean(os.environ.get("PRAXYS_FRONTEND_URL"))
     or _clean(os.environ.get("TRAINSIGHT_FRONTEND_URL"))
-    or (_DEFAULT_FRONTEND if IS_REMOTE else "")
+    or (_DEFAULT_FRONTEND if IS_REMOTE else "http://localhost:5173")
 )
 
 _LOCAL_PRELOAD_MODULES = (
@@ -183,6 +189,79 @@ def _remote_delete(path: str) -> dict:
     res = requests.delete(f"{REMOTE_URL}{path}", headers=_get_remote_headers(), timeout=30)
     _check_auth_error(res)
     return res.json()
+
+
+def _public_post(path: str, data: dict | None = None) -> dict:
+    """POST without a bearer for one-time opaque handoff operations."""
+    import requests
+
+    res = requests.post(
+        f"{REMOTE_URL}{path}",
+        headers={"Content-Type": "application/json"},
+        json=data,
+        timeout=30,
+    )
+    _check_auth_error(res)
+    return res.json() if res.content else {}
+
+
+def _context_remote_headers() -> dict:
+    """Return the separately cached short-lived context capability."""
+    token = get_context_token()
+    if token is None:
+        raise RuntimeError(
+            "Personal-context access is not authorized. Run "
+            "`request_personal_context_access`, approve it in Praxys, then "
+            "run `complete_personal_context_access`."
+        )
+    return {"Authorization": f"******"}
+
+
+def _context_remote_get(path: str) -> dict:
+    import requests
+
+    res = requests.get(
+        f"{REMOTE_URL}{path}",
+        headers=_context_remote_headers(),
+        timeout=30,
+    )
+    _check_auth_error(res)
+    return res.json()
+
+
+def _context_remote_post(path: str, data: dict | None = None) -> dict:
+    import requests
+
+    headers = _context_remote_headers()
+    headers["Content-Type"] = "application/json"
+    res = requests.post(
+        f"{REMOTE_URL}{path}",
+        headers=headers,
+        json=data,
+        timeout=30,
+    )
+    _check_auth_error(res)
+    return res.json() if res.content else {}
+
+
+def _frontend_link(path: str) -> str:
+    """Join only a fixed same-client relative path to the frontend origin."""
+    from urllib.parse import urlsplit
+
+    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+        raise RuntimeError("Praxys returned an invalid authorization path")
+    frontend = urlsplit(FRONTEND_URL)
+    if (
+        frontend.scheme not in ("http", "https")
+        or not frontend.netloc
+        or frontend.username is not None
+        or frontend.password is not None
+        or frontend.path not in ("", "/")
+        or frontend.query
+        or frontend.fragment
+    ):
+        raise RuntimeError("PRAXYS_FRONTEND_URL must be an HTTP(S) origin")
+    return f"{FRONTEND_URL}{path}"
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +516,166 @@ def _local_resolve_plan_conflict(
         db.close()
 
 
+def _local_context_actor(db):
+    """Resolve the cached context token through the host's live grant table."""
+    from api.mcp_access import authenticate_access_token, token_claims
+    from api.personal_context_auth import ContextActor
+
+    raw_token = get_context_token()
+    if raw_token is None:
+        raise RuntimeError(
+            "Personal-context access is not authorized. Run "
+            "`request_personal_context_access`, approve it in Praxys, then "
+            "run `complete_personal_context_access`."
+        )
+    token = authenticate_access_token(
+        db,
+        raw_token=raw_token,
+        expected_type="context",
+    )
+    claims = token_claims(token)
+    return ContextActor(
+        user_id=token.user_id,
+        actor_type="mcp",
+        actor_id=token.actor_id,
+        scopes=frozenset(token.scopes or []),
+        purposes=frozenset(token.purposes or []),
+        kinds=frozenset(token.kinds or []),
+        is_demo=False,
+        credential_kind="context_grant",
+        token_id=token.id,
+        grant_id=token.id,
+        audience=claims["context_audience"],
+    )
+
+
+def _local_request_personal_context_access(payload: dict) -> dict:
+    """Create the same pending handoff as the remote API without a DB bypass."""
+    db = _local_db()
+    try:
+        from api.mcp_access import create_context_handoff
+        from api.views import utc_isoformat
+
+        created = create_context_handoff(
+            db,
+            user_id=_local_write_user_id(db),
+            actor_id=f"mcp:{get_auth_scope().profile}",
+            audience=payload["audience"],
+            purpose=payload["purpose"],
+            kind=payload["kind"],
+            access=payload["access"],
+        )
+        db.commit()
+        return {
+            "state": created.state,
+            "exchange_secret": created.exchange_secret,
+            "authorize_path": (
+                f"/mcp/authorize?state={created.state}"
+            ),
+            "expires_at": utc_isoformat(created.handoff.expires_at),
+        }
+    finally:
+        db.close()
+
+
+def _local_exchange_personal_context_access(payload: dict) -> dict:
+    db = _local_db()
+    try:
+        from api.mcp_access import (
+            McpAccessPending,
+            access_names,
+            exchange_handoff,
+        )
+        from api.views import utc_isoformat
+
+        try:
+            exchanged = exchange_handoff(
+                db,
+                state=payload["state"],
+                exchange_secret=payload["exchange_secret"],
+            )
+        except McpAccessPending:
+            db.rollback()
+            return {"status": "pending"}
+        db.commit()
+        token = exchanged.token
+        return {
+            "access_token": exchanged.access_token,
+            "token_type": "bearer",
+            "expires_at": utc_isoformat(token.expires_at),
+            "purpose": (token.purposes or [None])[0],
+            "kind": (token.kinds or [None])[0],
+            "access": access_names(token),
+        }
+    finally:
+        db.close()
+
+
+def _local_read_personal_context() -> dict:
+    db = _local_db()
+    try:
+        from api.routes.personal_context import (
+            select_scoped_personal_context,
+        )
+        from starlette.responses import Response
+
+        actor = _local_context_actor(db)
+        return _local_route_result(
+            lambda: select_scoped_personal_context(
+                response=Response(),
+                actor=actor,
+                db=db,
+            )
+        )
+    finally:
+        db.close()
+
+
+def _local_preview_personal_context(payload: dict) -> dict:
+    db = _local_db()
+    try:
+        from api.routes.personal_context import (
+            ScopedContextDraftRequest,
+            preview_scoped_personal_context,
+        )
+        from starlette.responses import Response
+
+        actor = _local_context_actor(db)
+        body = _local_route_result(
+            lambda: ScopedContextDraftRequest(**payload)
+        )
+        return _local_route_result(
+            lambda: preview_scoped_personal_context(
+                body=body,
+                response=Response(),
+                actor=actor,
+                db=db,
+            )
+        )
+    finally:
+        db.close()
+
+
+def _local_revoke_personal_context_access() -> dict:
+    db = _local_db()
+    try:
+        from api.routes.personal_context import (
+            revoke_scoped_personal_context_access,
+        )
+        from starlette.responses import Response
+
+        actor = _local_context_actor(db)
+        return _local_route_result(
+            lambda: revoke_scoped_personal_context_access(
+                response=Response(),
+                actor=actor,
+                db=db,
+            )
+        )
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # MCP Tools — Training Data
 # ---------------------------------------------------------------------------
@@ -502,6 +741,228 @@ def get_training_context() -> str:
     else:
         from api.ai import build_training_context
         data = build_training_context()
+    return json.dumps(data, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# MCP Tools — Purpose-bound personal context
+# ---------------------------------------------------------------------------
+
+_CONTEXT_PURPOSES = {
+    "plan_generation",
+    "execution_interpretation",
+    "plan_adjustment",
+    "goal_review",
+    "outcome_review",
+}
+_CONTEXT_KINDS = {
+    "temporary_constraint",
+    "execution_explanation",
+}
+_CONTEXT_ACCESS = {"read", "write"}
+_CONTEXT_AUDIENCE = "praxys-coach-plugin"
+_CONTEXT_PURPOSE_KINDS = {
+    "plan_generation": {"temporary_constraint"},
+    "execution_interpretation": {"execution_explanation"},
+    "plan_adjustment": {
+        "temporary_constraint",
+        "execution_explanation",
+    },
+    "goal_review": {"temporary_constraint"},
+    "outcome_review": {
+        "temporary_constraint",
+        "execution_explanation",
+    },
+}
+
+
+def _context_request_error(message: str) -> str:
+    return json.dumps({"status": "error", "message": message}, indent=2)
+
+
+@mcp.tool()
+def request_personal_context_access(
+    purpose: str,
+    kind: str,
+    access: list[str],
+) -> str:
+    """Request short-lived structured context access for one purpose.
+
+    This tool never grants access. It returns a Praxys first-party approval
+    link. Narrative and AI-consent authority are not requestable.
+    """
+    if purpose not in _CONTEXT_PURPOSES:
+        return _context_request_error("purpose is not supported")
+    if kind not in _CONTEXT_KINDS:
+        return _context_request_error("kind is not supported")
+    if kind not in _CONTEXT_PURPOSE_KINDS[purpose]:
+        return _context_request_error(
+            "kind is not available for the requested purpose"
+        )
+    if (
+        not access
+        or len(access) != len(set(access))
+        or not set(access).issubset(_CONTEXT_ACCESS)
+    ):
+        return _context_request_error(
+            "access must contain read, write, or both exactly once"
+        )
+    if IS_REMOTE and not (get_token() or "").startswith("praxys_mcp_"):
+        return _context_request_error(
+            "Run `login` again to replace the legacy account token with a "
+            "revocable MCP session before requesting personal context."
+        )
+    ordered_access = [
+        item for item in ("read", "write") if item in access
+    ]
+    payload = {
+        "audience": _CONTEXT_AUDIENCE,
+        "purpose": purpose,
+        "kind": kind,
+        "access": ordered_access,
+    }
+    if IS_REMOTE:
+        response = _remote_post(
+            "/api/personal-context/scoped-access/requests",
+            payload,
+        )
+    else:
+        response = _local_request_personal_context_access(payload)
+    save_pending_context_access({
+        "state": response["state"],
+        "exchange_secret": response["exchange_secret"],
+        "expires_at": response["expires_at"],
+    })
+    return json.dumps({
+        "status": "approval_required",
+        "authorization_url": _frontend_link(response["authorize_path"]),
+        "expires_at": response["expires_at"],
+        "audience": _CONTEXT_AUDIENCE,
+        "purpose": purpose,
+        "kind": kind,
+        "access": ordered_access,
+        "authority": {
+            "narrative": False,
+            "ai_consent": False,
+            "durable_write": False,
+        },
+    }, indent=2)
+
+
+@mcp.tool()
+def complete_personal_context_access() -> str:
+    """Exchange an athlete-approved request and cache its bounded token."""
+    pending = get_pending_context_access()
+    if pending is None:
+        return _context_request_error(
+            "No context request is pending. Run "
+            "request_personal_context_access first."
+        )
+    payload = {
+        "state": pending.get("state"),
+        "exchange_secret": pending.get("exchange_secret"),
+    }
+    if IS_REMOTE:
+        response = _public_post(
+            "/api/auth/mcp/handoffs/exchange",
+            payload,
+        )
+    else:
+        response = _local_exchange_personal_context_access(payload)
+    if response.get("status") == "pending":
+        return json.dumps({
+            "status": "pending",
+            "message": "Approve or deny the request in Praxys first.",
+            "expires_at": pending.get("expires_at"),
+        }, indent=2)
+    save_context_token(response["access_token"])
+    clear_pending_context_access()
+    return json.dumps({
+        "status": "authorized",
+        "expires_at": response["expires_at"],
+        "purpose": response.get("purpose"),
+        "kind": response.get("kind"),
+        "access": response.get("access") or [],
+        "authority": {
+            "narrative": False,
+            "ai_consent": False,
+            "durable_write": False,
+        },
+    }, indent=2)
+
+
+@mcp.tool()
+def read_personal_context() -> str:
+    """Read the minimum structured projection allowed by the active grant."""
+    data = (
+        _context_remote_get("/api/personal-context/scoped/selection")
+        if IS_REMOTE
+        else _local_read_personal_context()
+    )
+    return json.dumps(data, indent=2, default=str)
+
+
+@mcp.tool()
+def preview_personal_context(
+    kind: str,
+    purpose: str,
+    category: str,
+    fields: dict,
+    starts_at: str | None = None,
+    expires_at: str | None = None,
+    purge_after: str | None = None,
+    linked_subject_type: str | None = None,
+    linked_subject_id: str | None = None,
+) -> str:
+    """Draft one structured context item for first-party athlete confirmation.
+
+    The grant is single-use. This tool cannot accept narrative and cannot save,
+    correct, approve, or grant AI processing for personal context.
+    """
+    payload = {
+        "kind": kind,
+        "purpose": purpose,
+        "payload": {
+            "category": category,
+            "fields": fields,
+        },
+        "starts_at": starts_at,
+        "expires_at": expires_at,
+        "purge_after": purge_after,
+        "linked_subject_type": linked_subject_type,
+        "linked_subject_id": linked_subject_id,
+    }
+    payload = {
+        key: value for key, value in payload.items() if value is not None
+    }
+    data = (
+        _context_remote_post(
+            "/api/personal-context/scoped/preview",
+            payload,
+        )
+        if IS_REMOTE
+        else _local_preview_personal_context(payload)
+    )
+    data = dict(data)
+    data["confirmation_url"] = _frontend_link(
+        data["confirmation_path"]
+    )
+    data["durable_write_performed"] = False
+    return json.dumps(data, indent=2, default=str)
+
+
+@mcp.tool()
+def revoke_personal_context_access() -> str:
+    """Revoke the current structured-context grant immediately."""
+    data = (
+        _context_remote_post(
+            "/api/personal-context/scoped-access/revoke",
+            {},
+        )
+        if IS_REMOTE
+        else _local_revoke_personal_context_access()
+    )
+    clear_context_token()
     return json.dumps(data, indent=2, default=str)
 
 
@@ -1411,110 +1872,72 @@ def get_sync_status() -> str:
     return json.dumps(data, indent=2, default=str)
 
 
+def _opaque_browser_login(scope) -> str:
+    """Complete browser login without putting a bearer in any URL."""
+    import time
+    import webbrowser
+    import requests
+
+    handoff = _public_post(
+        "/api/auth/mcp/handoffs",
+        {"audience": _CONTEXT_AUDIENCE},
+    )
+    webbrowser.open(_frontend_link(handoff["authorize_path"]))
+    deadline = time.monotonic() + 120
+    exchanged: dict | None = None
+    while time.monotonic() < deadline:
+        result = _public_post(
+            "/api/auth/mcp/handoffs/exchange",
+            {
+                "state": handoff["state"],
+                "exchange_secret": handoff["exchange_secret"],
+            },
+        )
+        if result.get("access_token"):
+            exchanged = result
+            break
+        time.sleep(2)
+    if exchanged is None:
+        return json.dumps({
+            "status": "error",
+            "message": "Login timed out. Start a new request and try again.",
+        })
+
+    token_path = save_token(exchanged["access_token"])
+    me_res = requests.get(
+        f"{REMOTE_URL}/api/auth/mcp/me",
+        headers=_get_remote_headers(),
+        timeout=10,
+    )
+    _check_auth_error(me_res)
+    user_info = me_res.json()
+    save_config({
+        "url": REMOTE_URL,
+        "email": user_info.get("email", ""),
+    })
+    return json.dumps({
+        "status": "authenticated",
+        "profile": scope.profile,
+        "email": user_info.get("email", ""),
+        "user_id": user_info.get("id"),
+        "is_admin": user_info.get("is_superuser", False),
+        "token_cached": str(token_path),
+        "expires_at": exchanged.get("expires_at"),
+    })
+
+
 @mcp.tool()
 def login() -> str:
     """Authenticate with Praxys via browser login.
 
-    Opens the Praxys login page in your browser. After you log in,
-    the token is automatically captured and cached for CLI use.
-    No passwords are entered in the CLI.
+    Opens a first-party approval page with opaque state, then exchanges the
+    separately held verifier for a revocable MCP session. Account JWTs and
+    passwords never enter the plugin process.
     """
     if not IS_REMOTE:
         return json.dumps({"status": "skipped", "message": "Login not needed in local mode"})
     scope = get_auth_scope()
-
-    import socket
-    import threading
-    import webbrowser
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    from urllib.parse import urlparse, parse_qs
-
-    token_result = {"token": None, "error": None}
-
-    def _find_available_port(preferred: int = 9876) -> int:
-        """Try preferred port, fall back to OS-assigned port."""
-        for port in [preferred, 0]:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("127.0.0.1", port))
-                    return s.getsockname()[1]
-            except OSError:
-                continue
-        raise RuntimeError("Cannot bind to any port for login callback")
-
-    class CallbackHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-
-            if parsed.path == "/callback" and "token" in params:
-                token_result["token"] = params["token"][0]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                self.wfile.write(b"""<html><body style="font-family:system-ui;text-align:center;padding:60px;background:#0a0e17;color:#fff">
-                    <h1 style="color:#00ff87">Authenticated!</h1>
-                    <p>You can close this tab and return to the CLI.</p>
-                </body></html>""")
-            else:
-                token_result["error"] = "No token received"
-                self.send_response(400)
-                self.end_headers()
-                self.wfile.write(b"Authentication failed")
-
-            # Shut down the server after handling
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
-
-        def log_message(self, format, *args):
-            pass  # Suppress HTTP logs
-
-    # Start local callback server (finds available port)
-    callback_port = _find_available_port()
-    server = HTTPServer(("127.0.0.1", callback_port), CallbackHandler)
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-
-    # Open browser with callback URL
-    # Token is passed via URL query to localhost only — same pattern as
-    # gh auth login, gcloud auth login. Never leaves the local machine.
-    callback_url = f"http://localhost:{callback_port}/callback"
-    login_url = f"{FRONTEND_URL}/login?cli_callback={callback_url}"
-    webbrowser.open(login_url)
-
-    # Wait for callback (timeout 120 seconds)
-    server_thread.join(timeout=120)
-    server.shutdown()
-
-    if token_result["token"]:
-        token = token_result["token"]
-        token_path = save_token(token)
-
-        # Fetch user info
-        import requests
-        me_res = requests.get(
-            f"{REMOTE_URL}/api/auth/me",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        user_info = me_res.json() if me_res.ok else {}
-        save_config({
-            "url": REMOTE_URL,
-            "email": user_info.get("email", ""),
-        })
-
-        return json.dumps({
-            "status": "authenticated",
-            "profile": scope.profile,
-            "email": user_info.get("email", ""),
-            "user_id": user_info.get("id"),
-            "is_admin": user_info.get("is_superuser", False),
-            "token_cached": str(token_path),
-        })
-    else:
-        return json.dumps({
-            "status": "error",
-            "message": token_result.get("error", "Login timed out. Please try again."),
-        })
+    return _opaque_browser_login(scope)
 
 
 @mcp.tool()
@@ -1547,7 +1970,11 @@ def whoami() -> str:
 
     import requests
     headers = _get_remote_headers()
-    res = requests.get(f"{REMOTE_URL}/api/auth/me", headers=headers, timeout=10)
+    res = requests.get(
+        f"{REMOTE_URL}/api/auth/mcp/me",
+        headers=headers,
+        timeout=10,
+    )
     if res.status_code == 401:
         return json.dumps({"status": "token_expired", "message": "Token expired. Please run `login` again."})
     res.raise_for_status()
@@ -1564,8 +1991,34 @@ def whoami() -> str:
 
 @mcp.tool()
 def logout() -> str:
-    """Delete the cached token and config for only the active profile."""
+    """Revoke issued grants, then clear only the active profile."""
     scope = get_auth_scope()
+    remote_session_revoked = False
+    remote_context_revoked = False
+    if IS_REMOTE:
+        import requests
+
+        if get_context_token() is not None:
+            try:
+                _context_remote_post(
+                    "/api/personal-context/scoped-access/revoke",
+                    {},
+                )
+                remote_context_revoked = True
+            except (RuntimeError, requests.RequestException):
+                pass
+        session_token = get_token()
+        if session_token and session_token.startswith("praxys_mcp_"):
+            try:
+                res = requests.post(
+                    f"{REMOTE_URL}/api/auth/mcp/revoke",
+                    headers=_get_remote_headers(),
+                    timeout=10,
+                )
+                _check_auth_error(res)
+                remote_session_revoked = True
+            except (RuntimeError, requests.RequestException):
+                pass
     result = clear_auth_scope()
     return json.dumps({
         "status": (
@@ -1580,6 +2033,8 @@ def logout() -> str:
         "legacy_fallback_suppressed": (
             result.legacy_fallback_suppressed
         ),
+        "remote_session_revoked": remote_session_revoked,
+        "remote_context_revoked": remote_context_revoked,
     })
 
 
