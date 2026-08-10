@@ -218,24 +218,43 @@ class AuthProfileTests(unittest.TestCase):
     def test_logout_deletes_only_the_active_scope(self) -> None:
         auth.save_token("default-token")
         auth.save_config({"email": "default@example.test"})
+        auth.save_context_token("default-context-token")
+        auth.save_pending_context_access({
+            "state": "default-state",
+            "exchange_secret": "default-secret",
+        })
         default_scope = auth.get_auth_scope()
 
         os.environ["PRAXYS_PROFILE"] = "dev-test"
         auth.save_token("dev-token")
         auth.save_config({"email": "dev@example.test"})
+        auth.save_context_token("dev-context-token")
+        auth.save_pending_context_access({
+            "state": "dev-state",
+            "exchange_secret": "dev-secret",
+        })
         dev_scope = auth.get_auth_scope()
 
         result = auth.logout()
 
         self.assertCountEqual(
             result.removed_paths,
-            [dev_scope.token_path, dev_scope.config_path],
+            [
+                dev_scope.token_path,
+                dev_scope.config_path,
+                dev_scope.context_token_path,
+                dev_scope.pending_context_path,
+            ],
         )
         self.assertFalse(result.legacy_fallback_suppressed)
         self.assertTrue(default_scope.token_path.exists())
         self.assertTrue(default_scope.config_path.exists())
+        self.assertTrue(default_scope.context_token_path.exists())
+        self.assertTrue(default_scope.pending_context_path.exists())
         self.assertFalse(dev_scope.token_path.exists())
         self.assertFalse(dev_scope.config_path.exists())
+        self.assertFalse(dev_scope.context_token_path.exists())
+        self.assertFalse(dev_scope.pending_context_path.exists())
 
     def test_default_logout_suppresses_without_deleting_legacy_auth(self) -> None:
         legacy_dir = self.home / ".trainsight"

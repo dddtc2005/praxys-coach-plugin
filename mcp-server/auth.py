@@ -1,15 +1,11 @@
-"""Profile-scoped JWT authentication for the remote Praxys API."""
+"""Profile-scoped opaque MCP and personal-context credential storage."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-import getpass
 import json
 import os
 from pathlib import Path
 import re
-
-import requests
-
 
 CONFIG_DIR = os.path.expanduser("~/.praxys")
 LEGACY_CONFIG_DIR = os.path.expanduser("~/.trainsight")
@@ -27,6 +23,8 @@ class AuthScope:
     profile: str
     token_path: Path
     config_path: Path
+    context_token_path: Path
+    pending_context_path: Path
     fallback_token_paths: tuple[Path, ...] = ()
     fallback_config_paths: tuple[Path, ...] = ()
     legacy_suppression_path: Path | None = None
@@ -67,6 +65,12 @@ def get_auth_scope() -> AuthScope:
             config_path=token_path.with_name(
                 f"{token_path.name}.config.json"
             ),
+            context_token_path=token_path.with_name(
+                f"{token_path.name}.context"
+            ),
+            pending_context_path=token_path.with_name(
+                f"{token_path.name}.context-pending.json"
+            ),
         )
 
     if profile == "default":
@@ -74,6 +78,9 @@ def get_auth_scope() -> AuthScope:
             profile=profile,
             token_path=Path(TOKEN_PATH),
             config_path=Path(CONFIG_PATH),
+            context_token_path=Path(CONFIG_DIR) / "context-token",
+            pending_context_path=Path(CONFIG_DIR)
+            / "context-pending.json",
             fallback_token_paths=(Path(_LEGACY_TOKEN_PATH),),
             fallback_config_paths=(Path(_LEGACY_CONFIG_PATH),),
             legacy_suppression_path=Path(CONFIG_DIR)
@@ -85,6 +92,8 @@ def get_auth_scope() -> AuthScope:
         profile=profile,
         token_path=profile_dir / "token",
         config_path=profile_dir / "config.json",
+        context_token_path=profile_dir / "context-token",
+        pending_context_path=profile_dir / "context-pending.json",
     )
 
 
@@ -132,7 +141,7 @@ def save_config(config: dict) -> None:
 
 
 def get_token() -> str | None:
-    """Read the cached JWT token for the active profile."""
+    """Read the cached MCP session for the active profile."""
     scope = get_auth_scope()
     path = _first_existing_path(
         scope.token_path,
@@ -145,7 +154,7 @@ def get_token() -> str | None:
 
 
 def save_token(token: str) -> Path:
-    """Cache a JWT token for the active profile and return its path."""
+    """Cache an opaque MCP session for the active profile."""
     scope = get_auth_scope()
     path = scope.token_path
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,11 +172,78 @@ def save_token(token: str) -> Path:
     return path
 
 
+def get_context_token() -> str | None:
+    """Read the short-lived structured-context token for this profile."""
+    path = get_auth_scope().context_token_path
+    if not path.is_file():
+        return None
+    token = path.read_text(encoding="utf-8").strip()
+    return token or None
+
+
+def save_context_token(token: str) -> Path:
+    """Cache a bounded context token separately from the MCP session."""
+    path = get_auth_scope().context_token_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
+
+
+def clear_context_token() -> bool:
+    """Remove only the active profile's structured-context token."""
+    path = get_auth_scope().context_token_path
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def get_pending_context_access() -> dict | None:
+    """Load client-held one-time handoff proof without exposing it to tools."""
+    path = get_auth_scope().pending_context_path
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else None
+
+
+def save_pending_context_access(value: dict) -> Path:
+    """Persist one pending context exchange for the active profile."""
+    path = get_auth_scope().pending_context_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
+
+
+def clear_pending_context_access() -> bool:
+    """Remove the active profile's pending exchange proof."""
+    path = get_auth_scope().pending_context_path
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def logout() -> LogoutResult:
     """Log out the active profile without deleting legacy-client state."""
     scope = get_auth_scope()
     removed: list[Path] = []
-    for path in (scope.token_path, scope.config_path):
+    for path in (
+        scope.token_path,
+        scope.config_path,
+        scope.context_token_path,
+        scope.pending_context_path,
+    ):
         try:
             path.unlink()
         except FileNotFoundError:
@@ -187,40 +263,3 @@ def logout() -> LogoutResult:
         removed_paths=tuple(removed),
         legacy_fallback_suppressed=suppressed,
     )
-
-
-def login(
-    base_url: str,
-    email: str | None = None,
-    password: str | None = None,
-) -> str:
-    """Login to the Praxys API and cache the token in the active profile."""
-    if not email:
-        email = input("Email: ")
-    if not password:
-        password = getpass.getpass("Password: ")
-
-    response = requests.post(
-        f"{base_url}/api/auth/login",
-        data={"username": email, "password": password},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
-    response.raise_for_status()
-    token = response.json()["access_token"]
-    save_token(token)
-    save_config({"url": base_url, "email": email})
-    return token
-
-
-def ensure_authenticated(base_url: str) -> str:
-    """Get a valid scoped token, logging in interactively when needed."""
-    token = get_token()
-    if token:
-        response = requests.get(
-            f"{base_url}/api/auth/me",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        if response.ok:
-            return token
-    config = get_config()
-    return login(base_url, email=config.get("email"))
