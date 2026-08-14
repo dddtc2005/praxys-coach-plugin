@@ -2,7 +2,7 @@
 
 Claude Code plugin that surfaces [Praxys Coach](https://www.praxys.run) — a power-based scientific training dashboard for endurance athletes — through MCP tools and skills, so you can ask your training questions directly from your terminal.
 
-> Praxys Coach itself syncs your data from Garmin, Stryd, and Oura, computes power-based training metrics, and serves them via a web dashboard at praxys.run. This plugin is a thin Claude Code client that lets an agent read and act on that data on your behalf.
+> Praxys Coach brings supported training and recovery data together, computes power-based training metrics, and serves them via a web dashboard at praxys.run. This plugin is a thin Claude Code client that lets an agent read and act on that data on your behalf.
 
 ## Skills
 
@@ -10,7 +10,7 @@ The plugin exposes 8 skills (auto-discovered when installed):
 
 | Skill | What it does |
 |-------|-------------|
-| `setup` | Connect Garmin / Stryd / Oura, set training base, thresholds, race goal |
+| `setup` | Connect account-available data sources, set training base, thresholds, race goal |
 | `daily-brief` | Today's training signal (Go / Modify / Rest), recovery, upcoming workouts |
 | `training-review` | Multi-week diagnosis: volume, consistency, zone distribution, suggestions |
 | `training-plan` | Generate or update a personalized 4-week AI training plan |

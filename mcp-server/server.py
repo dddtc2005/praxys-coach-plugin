@@ -396,9 +396,14 @@ def _local_get_settings() -> dict:
     try:
         from api.routes.settings import get_settings as get_settings_route
 
+        viewer_user_id = _local_user_id()
         user_id = _local_data_user_id(db)
         return _local_route_result(
-            lambda: get_settings_route(user_id=user_id, db=db)
+            lambda: get_settings_route(
+                viewer_user_id=viewer_user_id,
+                user_id=user_id,
+                db=db,
+            )
         )
     finally:
         db.close()
@@ -411,6 +416,7 @@ def _local_get_plan(start: str, end: str) -> dict:
         from starlette.requests import Request
         from starlette.responses import Response
 
+        viewer_user_id = _local_user_id()
         user_id = _local_data_user_id(db)
         request = Request({
             "type": "http",
@@ -430,6 +436,7 @@ def _local_get_plan(start: str, end: str) -> dict:
                 response=Response(),
                 start=start,
                 end=end,
+                viewer_user_id=viewer_user_id,
                 user_id=user_id,
                 db=db,
             )
@@ -1109,18 +1116,19 @@ def get_connections() -> str:
     else:
         db = _local_db()
         try:
-            from db.models import UserConnection
-            connections = db.query(UserConnection).filter(
-                UserConnection.user_id == _local_user_id()
-            ).all()
-            result = {}
-            for conn in connections:
-                result[conn.platform] = {
-                    "status": conn.status,
-                    "last_sync": conn.last_sync.isoformat() if conn.last_sync else None,
-                    "has_credentials": conn.encrypted_credentials is not None,
-                }
-            data = {"connections": result}
+            from api.routes.settings import (
+                get_connections as get_connections_route,
+            )
+
+            viewer_user_id = _local_user_id()
+            user_id = _local_data_user_id(db)
+            data = _local_route_result(
+                lambda: get_connections_route(
+                    viewer_user_id=viewer_user_id,
+                    user_id=user_id,
+                    db=db,
+                )
+            )
         finally:
             db.close()
     return json.dumps(data, indent=2, default=str)
@@ -1131,11 +1139,9 @@ def connect_platform(platform: str, credentials: dict) -> str:
     """Connect a platform by storing encrypted credentials.
 
     Args:
-        platform: One of 'garmin', 'stryd', 'oura'
-        credentials: Platform-specific credentials dict:
-            - garmin: {"email": "...", "password": "...", "is_cn": false}
-            - stryd: {"email": "...", "password": "..."}
-            - oura: {"token": "..."}
+        platform: A platform currently offered in Praxys Settings.
+        credentials: The platform-specific credential fields accepted by
+            Praxys Settings.
 
     IMPORTANT: Never ask the user to type credentials in the conversation.
     Instead, ask them to enter credentials in the web Settings page. Only use
@@ -1147,46 +1153,23 @@ def connect_platform(platform: str, credentials: dict) -> str:
     else:
         db = _local_db()
         try:
-            from db.models import UserConnection
-            from db.crypto import get_vault
-            from analysis.config import PLATFORM_CAPABILITIES
+            from api.routes.settings import (
+                ConnectPlatformRequest,
+                connect_platform as connect_platform_route,
+            )
 
-            vault = get_vault()
-            encrypted_data, wrapped_dek = vault.encrypt(json.dumps(credentials))
-
-            caps = PLATFORM_CAPABILITIES.get(platform, {})
-            prefs = {k: v for k, v in caps.items() if v}
-
-            conn = db.query(UserConnection).filter(
-                UserConnection.user_id == _local_user_id(),
-                UserConnection.platform == platform,
-            ).first()
-            if conn:
-                conn.encrypted_credentials = encrypted_data
-                conn.wrapped_dek = wrapped_dek
-                conn.status = "connected"
-                conn.preferences = prefs
-            else:
-                conn = UserConnection(
-                    user_id=_local_user_id(),
+            user_id = _local_write_user_id(db)
+            body = _local_route_result(
+                lambda: ConnectPlatformRequest(**credentials)
+            )
+            data = _local_route_result(
+                lambda: connect_platform_route(
                     platform=platform,
-                    encrypted_credentials=encrypted_data,
-                    wrapped_dek=wrapped_dek,
-                    status="connected",
-                    preferences=prefs,
+                    body=body,
+                    user_id=user_id,
+                    db=db,
                 )
-                db.add(conn)
-            db.commit()
-            # Invalidate cached Garmin OAuth tokens so the next sync re-auths
-            # with the new credentials. Mirrors the API route — skipping this
-            # would reproduce the shared-tokenstore leak for local MCP users.
-            if platform == "garmin":
-                from api.routes.sync import clear_garmin_tokens
-                try:
-                    clear_garmin_tokens(_local_user_id())
-                except OSError:
-                    pass  # logged inside clear_garmin_tokens; treat as best-effort here
-            data = {"status": "connected", "platform": platform}
+            )
         finally:
             db.close()
     return json.dumps(data, indent=2, default=str)
@@ -1200,21 +1183,18 @@ def disconnect_platform(platform: str) -> str:
     else:
         db = _local_db()
         try:
-            from db.models import UserConnection
-            conn = db.query(UserConnection).filter(
-                UserConnection.user_id == _local_user_id(),
-                UserConnection.platform == platform,
-            ).first()
-            if conn:
-                db.delete(conn)
-                db.commit()
-            if platform == "garmin":
-                from api.routes.sync import clear_garmin_tokens
-                try:
-                    clear_garmin_tokens(_local_user_id())
-                except OSError:
-                    pass
-            data = {"status": "disconnected", "platform": platform}
+            from api.routes.settings import (
+                disconnect_platform as disconnect_platform_route,
+            )
+
+            user_id = _local_write_user_id(db)
+            data = _local_route_result(
+                lambda: disconnect_platform_route(
+                    platform=platform,
+                    user_id=user_id,
+                    db=db,
+                )
+            )
         finally:
             db.close()
     return json.dumps(data, indent=2, default=str)
@@ -1808,7 +1788,7 @@ def push_training_insights(
 
 @mcp.tool()
 def trigger_sync(sources: list[str] | None = None) -> str:
-    """Trigger data sync from connected platforms. Optionally specify sources: ['garmin', 'stryd', 'oura']. Requires the backend server to be running."""
+    """Trigger data sync, optionally limited to connected platform IDs. Requires the backend server to be running."""
     if IS_REMOTE:
         data = _remote_post("/api/sync", {"sources": sources} if sources else None)
     else:

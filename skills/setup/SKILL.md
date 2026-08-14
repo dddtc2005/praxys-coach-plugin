@@ -1,14 +1,12 @@
 ---
 name: setup
 description: >-
-  Configure Praxys: connect data sources (Garmin, Stryd, Oura), set training
-  base (power/HR/pace), configure thresholds (CP, LTHR, pace), set race goals,
-  and manage source preferences. Use this skill whenever the user asks to "connect
-  garmin", "set up stryd", "add oura", "change training base", "set my CP",
-  "set my goal", "configure preferences", "initial setup", "set threshold",
-  "switch to HR-based training", "disconnect a platform", or any request to
-  configure the training system. Also use when the user reports sync failures
-  or missing connections.
+  Configure Praxys: connect account-available data sources, set training base
+  (power/HR/pace), configure thresholds (CP, LTHR, pace), set race goals, and
+  manage source preferences. Use this skill whenever the user asks to connect
+  a platform, add Garmin or Oura, change training base, set a threshold or
+  goal, configure preferences, complete initial setup, disconnect a platform,
+  or troubleshoot a missing connection.
 ---
 
 # Praxys Setup
@@ -35,26 +33,26 @@ through the conversation. Prefer the web Settings page.
 
 ### 1. Platform Connections
 
-Platforms are connected via the web Settings page or the `connect_platform` tool.
-Credentials are encrypted with a per-user key and stored securely in the database.
+Platforms are connected via the web Settings page or the `connect_platform`
+tool. Credentials are encrypted with a per-user key and stored securely in the
+database. Treat `get_settings.platform_capabilities` as authoritative: platform
+availability can differ by account.
 
 | Platform | Required Credentials | How to Get |
 |----------|---------------------|------------|
 | Garmin | Email + password | Garmin Connect account |
 | Garmin China | Email + password + is_cn flag | Garmin Connect CN account |
-| Stryd | Email + password | Stryd account (stryd.com) |
+| COROS | Email + password | COROS account |
 | Oura | Personal access token | Generate at cloud.ouraring.com/personal-access-tokens |
+| Strava | OAuth approval | Connect from the web Settings page |
 
 To check connections: call `get_connections`
 To disconnect: call `disconnect_platform` with the platform name
 
-Platform capabilities:
-- **activities**: garmin, stryd, coros
-- **recovery**: garmin, oura
-- **fitness**: garmin, stryd, coros (auto-merged)
-- **managed-plan execution**: Stryd today; inspect
-  `get_managed_plan_status.available_execution_targets` rather than assuming a
-  connected platform supports writes
+Do not infer capabilities from a platform name. Read
+`get_settings.platform_capabilities`, and inspect
+`get_managed_plan_status.available_execution_targets` before suggesting a
+managed-plan execution target.
 
 ### Managed Plan Ownership
 
@@ -83,7 +81,7 @@ The training base determines which metric drives all analysis:
 
 | Base | Threshold | Load Metric | Best When |
 |------|-----------|-------------|-----------|
-| `power` | CP (watts) | RSS | Has Stryd or power meter |
+| `power` | CP (watts) | RSS | Has reliable running-power data |
 | `hr` | LTHR (bpm) | TRIMP | Has HR monitor, no power |
 | `pace` | Threshold pace (sec/km) | rTSS | GPS-only, no HR or power |
 
@@ -123,6 +121,6 @@ Default is every 6 hours.
 1. Call `get_connections` — check what's connected
 2. Guide user to connect platforms via web Settings page
 3. After connecting, call `trigger_sync` to pull initial data
-4. Set `training_base` based on available data (power if they have Stryd)
+4. Set `training_base` based on the available data and detected thresholds
 5. Set `goal` if they have a race target
 6. Verify data loaded: call `get_daily_brief` to confirm
