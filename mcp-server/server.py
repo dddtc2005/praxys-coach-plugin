@@ -14,6 +14,7 @@ Set PRAXYS_LOCAL=1 in your shell to develop against the local FastAPI/DB.
 """
 import importlib
 import importlib.util
+import asyncio
 import json
 import os
 import sys
@@ -325,7 +326,38 @@ def _local_dashboard_data() -> dict:
     db = _local_db()
     try:
         from api.deps import get_dashboard_data
-        return get_dashboard_data(user_id=_local_user_id(), db=db)
+        from api.stryd_access import stryd_connection_enabled
+
+        viewer_user_id = _local_user_id()
+        user_id = _local_data_user_id(db)
+        return get_dashboard_data(
+            user_id=user_id,
+            db=db,
+            include_stryd_plan=stryd_connection_enabled(
+                db,
+                user_id=viewer_user_id,
+            ),
+        )
+    finally:
+        db.close()
+
+
+def _local_training_context() -> dict:
+    db = _local_db()
+    try:
+        from api.ai import build_training_context
+        from api.stryd_access import stryd_connection_enabled
+
+        viewer_user_id = _local_user_id()
+        user_id = _local_data_user_id(db)
+        return build_training_context(
+            user_id=user_id,
+            db=db,
+            include_stryd_plan=stryd_connection_enabled(
+                db,
+                user_id=viewer_user_id,
+            ),
+        )
     finally:
         db.close()
 
@@ -746,8 +778,7 @@ def get_training_context() -> str:
     if IS_REMOTE:
         data = _remote_get("/api/ai/context")
     else:
-        from api.ai import build_training_context
-        data = build_training_context()
+        data = _local_training_context()
     return json.dumps(data, indent=2, default=str)
 
 
@@ -2029,6 +2060,21 @@ def logout() -> str:
     })
 
 
-if __name__ == "__main__":
+def _run_server() -> None:
+    """Run FastMCP with the local host's feature-gate lifecycle."""
     _preload_local_modules()
-    mcp.run()
+    if IS_REMOTE:
+        mcp.run()
+        return
+
+    from api.statsig_client import init_statsig, shutdown_statsig
+
+    asyncio.run(init_statsig())
+    try:
+        mcp.run()
+    finally:
+        asyncio.run(shutdown_statsig())
+
+
+if __name__ == "__main__":
+    _run_server()

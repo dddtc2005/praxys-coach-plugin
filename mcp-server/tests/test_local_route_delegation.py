@@ -113,6 +113,88 @@ class LocalRouteDelegationTests(unittest.TestCase):
         )
         db.close.assert_called_once_with()
 
+    def test_local_dashboard_filters_plan_for_viewer(self) -> None:
+        db = mock.Mock()
+        dashboard = mock.Mock(return_value={"signal": {}})
+        gate = mock.Mock(return_value=False)
+        with (
+            self._base_patches(db),
+            mock.patch.object(
+                self.server,
+                "_local_user_id",
+                return_value="viewer-user",
+            ),
+            mock.patch.object(
+                self.server,
+                "_local_data_user_id",
+                return_value="data-user",
+            ),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "api.deps": _module(
+                        "api.deps",
+                        get_dashboard_data=dashboard,
+                    ),
+                    "api.stryd_access": _module(
+                        "api.stryd_access",
+                        stryd_connection_enabled=gate,
+                    ),
+                },
+            ),
+        ):
+            result = self.server._local_dashboard_data()
+
+        self.assertEqual(result, {"signal": {}})
+        gate.assert_called_once_with(db, user_id="viewer-user")
+        dashboard.assert_called_once_with(
+            user_id="data-user",
+            db=db,
+            include_stryd_plan=False,
+        )
+        db.close.assert_called_once_with()
+
+    def test_local_training_context_filters_plan_for_viewer(self) -> None:
+        db = mock.Mock()
+        context = mock.Mock(return_value={"current_plan": []})
+        gate = mock.Mock(return_value=False)
+        with (
+            self._base_patches(db),
+            mock.patch.object(
+                self.server,
+                "_local_user_id",
+                return_value="demo-viewer",
+            ),
+            mock.patch.object(
+                self.server,
+                "_local_data_user_id",
+                return_value="source-user",
+            ),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "api.ai": _module(
+                        "api.ai",
+                        build_training_context=context,
+                    ),
+                    "api.stryd_access": _module(
+                        "api.stryd_access",
+                        stryd_connection_enabled=gate,
+                    ),
+                },
+            ),
+        ):
+            result = self.server._local_training_context()
+
+        self.assertEqual(result, {"current_plan": []})
+        gate.assert_called_once_with(db, user_id="demo-viewer")
+        context.assert_called_once_with(
+            user_id="source-user",
+            db=db,
+            include_stryd_plan=False,
+        )
+        db.close.assert_called_once_with()
+
     def test_local_plan_passes_viewer_and_data_user(self) -> None:
         db = mock.Mock()
         route = mock.Mock(return_value={"workouts": []})

@@ -39,6 +39,16 @@ class LocalStartupTests(unittest.TestCase):
         fastmcp_module.FastMCP = _FakeFastMCP
         main_module = ModuleType("__main__")
         main_module.__file__ = str(SERVER_PATH)
+        statsig_module = ModuleType("api.statsig_client")
+
+        async def init_statsig() -> None:
+            _EVENTS.append("statsig-init")
+
+        async def shutdown_statsig() -> None:
+            _EVENTS.append("statsig-shutdown")
+
+        statsig_module.init_statsig = init_statsig
+        statsig_module.shutdown_statsig = shutdown_statsig
 
         def record_import(module_name: str) -> ModuleType:
             _EVENTS.append(module_name)
@@ -63,6 +73,7 @@ class LocalStartupTests(unittest.TestCase):
                     "mcp": mcp_module,
                     "mcp.server": mcp_server_module,
                     "mcp.server.fastmcp": fastmcp_module,
+                    "api.statsig_client": statsig_module,
                 },
             ),
             mock.patch.object(
@@ -82,7 +93,9 @@ class LocalStartupTests(unittest.TestCase):
                 "api.deps",
                 "api.routes.plan",
                 "api.routes.settings",
+                "statsig-init",
                 "run",
+                "statsig-shutdown",
             ],
         )
 
