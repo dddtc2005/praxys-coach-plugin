@@ -1835,13 +1835,24 @@ def get_sync_status() -> str:
             # Fall back to checking connections in DB
             db = _local_db()
             try:
+                from api.stryd_access import stryd_connection_enabled
                 from db.models import UserConnection
                 from db.sync_scheduler import ACTIVE_CONNECTION_STATUSES
+                user_id = _local_user_id()
+                allow_private_connection = stryd_connection_enabled(
+                    db,
+                    user_id=user_id,
+                )
                 connections = db.query(UserConnection).filter(
-                    UserConnection.user_id == _local_user_id()
+                    UserConnection.user_id == user_id
                 ).all()
                 data = {}
                 for conn in connections:
+                    if (
+                        conn.platform == "stryd"
+                        and not allow_private_connection
+                    ):
+                        continue
                     data[conn.platform] = {
                         "status": "idle",
                         "last_sync": conn.last_sync.isoformat() if conn.last_sync else None,

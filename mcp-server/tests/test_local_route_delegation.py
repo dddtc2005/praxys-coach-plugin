@@ -8,9 +8,11 @@ import json
 import os
 from pathlib import Path
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
+
+import requests
 
 
 SERVER_PATH = Path(__file__).resolve().parents[1] / "server.py"
@@ -250,6 +252,68 @@ class LocalRouteDelegationTests(unittest.TestCase):
             user_id="writer-user",
             db=db,
         )
+
+    def test_sync_status_fallback_hides_ineligible_stryd_connection(
+        self,
+    ) -> None:
+        db = mock.Mock()
+        db.query.return_value.filter.return_value.all.return_value = [
+            SimpleNamespace(
+                platform="stryd",
+                status="connected",
+                last_sync=None,
+            ),
+            SimpleNamespace(
+                platform="garmin",
+                status="connected",
+                last_sync=None,
+            ),
+        ]
+        user_connection = type(
+            "UserConnection",
+            (),
+            {"user_id": mock.MagicMock()},
+        )
+        modules = {
+            "api.stryd_access": _module(
+                "api.stryd_access",
+                stryd_connection_enabled=lambda _db, *, user_id: False,
+            ),
+            "db.models": _module(
+                "db.models",
+                UserConnection=user_connection,
+            ),
+            "db.sync_scheduler": _module(
+                "db.sync_scheduler",
+                ACTIVE_CONNECTION_STATUSES={"connected"},
+            ),
+        }
+        with (
+            self._base_patches(db),
+            mock.patch.object(
+                self.server,
+                "_local_user_id",
+                return_value="viewer-user",
+            ),
+            mock.patch(
+                "requests.get",
+                side_effect=requests.ConnectionError,
+            ),
+            mock.patch.dict(sys.modules, modules),
+        ):
+            result = json.loads(self.server.get_sync_status())
+
+        self.assertEqual(
+            result,
+            {
+                "garmin": {
+                    "status": "idle",
+                    "last_sync": None,
+                    "connected": True,
+                },
+            },
+        )
+        db.close.assert_called_once_with()
 
 
 if __name__ == "__main__":
