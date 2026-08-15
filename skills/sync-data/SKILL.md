@@ -1,29 +1,28 @@
 ---
 name: sync-data
 description: >-
-  Sync training data from Garmin, Stryd, and/or Oura Ring. Use this skill when
-  the user asks to "sync my data", "pull training data", "update activities",
-  "refresh garmin data", "sync oura", "sync stryd", "download new runs",
-  "get latest workouts", "backfill data", or any request to fetch training data
-  from connected platforms. Also use when the user wants to check sync status.
+  Sync training data from account-connected platforms. Use this skill when the
+  user asks to sync data, pull training history, update activities, refresh
+  Garmin or Oura, download new runs, get latest workouts, backfill data, or
+  check sync status.
 ---
 
 # Sync Training Data
 
-Pull the latest training data from connected platforms (Garmin, Stryd, Oura)
-into the database.
+Pull the latest training data from connected platforms into the database.
 
 ## Running a Sync
 
 Call the `trigger_sync` MCP tool. Optionally pass a `sources` list to limit
-which platforms to sync (e.g., `["garmin", "stryd"]`).
+which platforms to sync (e.g., `["garmin", "oura"]`). Use platform IDs returned
+by `get_connections`; do not assume an unavailable source.
 
 To check the current sync state, call the `get_sync_status` MCP tool.
 
 ## How Sync Works
 
 1. The backend reads the user's encrypted credentials from the database
-2. Fetches new data from platform APIs (Garmin Connect, Stryd, Oura Ring)
+2. Fetches new data from each connected platform API
 3. Parses the API responses and writes directly to the SQLite database
 4. Updates the `last_sync` timestamp on the connection record
 
@@ -37,7 +36,6 @@ Users can inspect and change the interval (guardrailed to 6/12/24 hours) via:
 Default is every 6 hours.
 
 Webhook/subscription notes:
-- Stryd has no webhook API
 - Oura offers webhooks but Praxys does not subscribe to them today
   (see `docs/studies/webhook-feasibility.md` for the rationale)
 - Garmin push delivery requires partner approval, so Praxys uses
@@ -61,7 +59,6 @@ Format the output as a summary table for the user:
 | Source | Status | Last Sync |
 |--------|--------|-----------|
 | Garmin | connected | 2h ago |
-| Stryd | connected | 2h ago |
 | Oura | error | Token expired |
 
 If a source is not connected, suggest the user connect it via the Settings page
@@ -69,5 +66,4 @@ or the `setup` skill.
 
 If a source has `error` status, suggest common fixes:
 - Garmin: token expiry — reconnect in Settings
-- Stryd: 401 — check password in Settings
 - Oura: 401 — regenerate token at cloud.ouraring.com, update in Settings

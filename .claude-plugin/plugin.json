@@ -9,5 +9,5 @@
   "repository": "https://github.com/dddtc2005/praxys-coach-plugin",
   "homepage": "https://www.praxys.run",
   "license": "MIT",
-  "keywords": ["training", "running", "power", "stryd", "garmin", "oura", "fitness"]
+  "keywords": ["training", "running", "power", "garmin", "strava", "coros", "oura", "fitness"]
 }
